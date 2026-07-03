@@ -1,4 +1,9 @@
-numpy
 pandas
+numpy
 matplotlib
-streamlit
+seaborn
+plotly
+nbformat
+geopandas
+geodatasets
+contextily
