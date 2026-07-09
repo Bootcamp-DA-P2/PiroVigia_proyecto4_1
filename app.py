@@ -6,16 +6,21 @@ import plotly.express as px
 import requests
 from io import StringIO
 import datetime
+import requests
+from io import StringIO
+import datetime
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 st.set_page_config(
     page_title="PiroVigía Pro v4.5 | Real-Time Live Intelligence",
+    page_title="PiroVigía Pro v4.5 | Real-Time Live Intelligence",
     page_icon="🛰️",
     layout="wide"
 )
 
+# --- CARGA DEL NÚCLEO IA ---
 # --- CARGA DEL NÚCLEO IA ---
 @st.cache_resource
 def cargar_sistema_ia():
@@ -23,6 +28,7 @@ def cargar_sistema_ia():
         modelo = joblib.load("clasificador_tipos_smote.pkl")
         scaler = joblib.load("escalador_features.pkl")
         return modelo, scaler
+    except Exception as e:
     except Exception as e:
         return None, None
 
@@ -200,6 +206,7 @@ if not df_completo.empty:
 else:
     df_filtrado = pd.DataFrame()
 
+# --- AUDITORÍA MANUAL UNITARIA ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔮 Auditoría Unitaria Inteligente")
 with st.sidebar.form("formulario_ia"):
@@ -220,6 +227,16 @@ else:
     st.subheader("📊 MODO ANÁLISIS: Consulta de Base de Datos Histórica Continental")
 
 k1, k2, k3, k4 = st.columns(4)
+alertas_activas = len(df_filtrado)
+frp_promedio = df_filtrado['frp'].mean() if alertas_activas > 0 else 0.0
+max_termico = df_filtrado['brightness'].max() if alertas_activas > 0 else 0.0
+focos_forestales = len(df_filtrado[df_filtrado['Origen'] == 'Incendio Forestal']) if alertas_activas > 0 else 0
+ratio_riesgo = (focos_forestales / max(alertas_activas, 1) * 100) if alertas_activas > 0 else 0.0
+
+with k1: st.metric("Anomalías Activas", f"{alertas_activas:,}")
+with k2: st.metric("Potencia FRP Promedio", f"{frp_promedio:.1f} MW")
+with k3: st.metric("Máximo Térmico Detectado", f"{max_termico:.1f} K")
+with k4: st.metric("Índice de Riesgo Forestal", f"{ratio_riesgo:.1f}%")
 alertas_activas = len(df_filtrado)
 frp_promedio = df_filtrado['frp'].mean() if alertas_activas > 0 else 0.0
 max_termico = df_filtrado['brightness'].max() if alertas_activas > 0 else 0.0
@@ -269,7 +286,32 @@ if alertas_activas > 0:
         with t_col2:
             fig_dn = px.histogram(df_filtrado, x='Origen', color='Horario', title="Distribución por Ciclo Solar", barmode='group', color_discrete_sequence=['#E9C46A', '#457B9D'])
             st.plotly_chart(fig_dn, use_container_width=True)
+    with tab_temporal:
+        st.subheader("Análisis de Tendencias Chrono-Satelitales")
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            if modo_datos == "📊 Archivo Histórico Local":
+                df_mes = df_filtrado.groupby(['Mes_Num', 'Mes', 'Origen']).size().reset_index(name='Detecciones').sort_values('Mes_Num')
+                fig_mes = px.line(df_mes, x='Mes', y='Detecciones', color='Origen', title="Historial Estacional de Alertas", color_discrete_map=colores_sistema, markers=True)
+                st.plotly_chart(fig_mes, use_container_width=True)
+            else:
+                df_horas = df_filtrado.copy()
+                df_horas['Hora'] = df_horas['acq_date'].dt.hour
+                fig_horas = px.histogram(df_horas, x='Hora', color='Origen', title="Detecciones hoy por tramo horario", barmode='stack', color_discrete_map=colores_sistema)
+                st.plotly_chart(fig_horas, use_container_width=True)
+        with t_col2:
+            fig_dn = px.histogram(df_filtrado, x='Origen', color='Horario', title="Distribución por Ciclo Solar", barmode='group', color_discrete_sequence=['#E9C46A', '#457B9D'])
+            st.plotly_chart(fig_dn, use_container_width=True)
 
+    with tab_fisica:
+        st.subheader("Física Cuantitativa y Firmas Térmicas")
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            fig_box = px.box(df_filtrado, x='Origen', y='brightness', color='Origen', title="Rangos de Temperatura de Brillo (K)", color_discrete_map=colores_sistema)
+            st.plotly_chart(fig_box, use_container_width=True)
+        with f_col2:
+            fig_disp = px.scatter(df_filtrado, x='brightness', y='frp', color='Origen', size='confidence', title="Temperatura vs Potencia FRP", color_discrete_map=colores_sistema, opacity=0.7)
+            st.plotly_chart(fig_disp, use_container_width=True)
     with tab_fisica:
         st.subheader("Física Cuantitativa y Firmas Térmicas")
         f_col1, f_col2 = st.columns(2)
