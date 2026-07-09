@@ -15,12 +15,10 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 st.set_page_config(
     page_title="PiroVigía Pro v4.5 | Real-Time Live Intelligence",
-    page_title="PiroVigía Pro v4.5 | Real-Time Live Intelligence",
     page_icon="🛰️",
     layout="wide"
 )
 
-# --- CARGA DEL NÚCLEO IA ---
 # --- CARGA DEL NÚCLEO IA ---
 @st.cache_resource
 def cargar_sistema_ia():
@@ -28,7 +26,6 @@ def cargar_sistema_ia():
         modelo = joblib.load("clasificador_tipos_smote.pkl")
         scaler = joblib.load("escalador_features.pkl")
         return modelo, scaler
-    except Exception as e:
     except Exception as e:
         return None, None
 
