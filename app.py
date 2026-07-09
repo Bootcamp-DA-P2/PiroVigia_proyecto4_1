@@ -181,7 +181,7 @@ else:
 if not df_completo.empty:
     fecha_min, fecha_max = df_completo['acq_date'].min().to_pydatetime(), df_completo['acq_date'].max().to_pydatetime()
     if modo_datos == "📊 Archivo Histórico Local":
-        rango_fechas = st.sidebar.date_input("Periodo de Observación", value=(fecha_min, fecha_max), min_value=fecha_min, max_value=fecha_max)
+        rango_fechas = st.sidebar.date_input("Periodo de Observation", value=(fecha_min, fecha_max), min_value=fecha_min, max_value=fecha_max)
     else:
         st.sidebar.caption(f"📅 Monitorizando ventana activa: {fecha_min.strftime('%d/%m/%Y')} al {fecha_max.strftime('%d/%m/%Y')}")
         rango_fechas = (fecha_min, fecha_max)
@@ -270,6 +270,7 @@ if alertas_activas > 0:
             fig_dn = px.histogram(df_filtrado, x='Origen', color='Horario', title="Distribución por Ciclo Solar", barmode='group', color_discrete_sequence=['#E9C46A', '#457B9D'])
             st.plotly_chart(fig_dn, use_container_width=True)
 
+    # --- PESTAÑA DE FÍSICA ACTUALIZADA CON CONTORNOS DE DENSIDAD ---
     with tab_fisica:
         st.subheader("Física Cuantitativa y Firmas Térmicas")
         f_col1, f_col2 = st.columns(2)
@@ -277,7 +278,14 @@ if alertas_activas > 0:
             fig_box = px.box(df_filtrado, x='Origen', y='brightness', color='Origen', title="Rangos de Temperatura de Brillo (K)", color_discrete_map=colores_sistema)
             st.plotly_chart(fig_box, use_container_width=True)
         with f_col2:
-            fig_disp = px.scatter(df_filtrado, x='brightness', y='frp', color='Origen', size='confidence', title="Temperatura vs Potencia FRP", color_discrete_map=colores_sistema, opacity=0.7)
+            fig_disp = px.density_contour(
+                df_filtrado, 
+                x='brightness', 
+                y='frp', 
+                title="Curvas de Nivel: Concentración de Temperatura vs Potencia FRP"
+            )
+            # Hacemos que las líneas se vean con colores más llamativos e intensos
+            fig_disp.update_traces(contours_coloring="fill", colorscale="Viridis")
             st.plotly_chart(fig_disp, use_container_width=True)
 
     with tab_datos:
@@ -286,16 +294,15 @@ if alertas_activas > 0:
         top_criticos.columns = ['Fecha / Registro', 'Latitud', 'Longitud', 'Brillo (K)', 'FRP (MW)', 'Confianza (%)', 'Clasificación IA', 'Horario']
         st.dataframe(top_criticos, use_container_width=True, hide_index=True)
 
-    # --- PESTAÑA HISTÓRICA AISLADA: ESPAÑA (Paletas e Interanual Corregidos) ---
+    # --- PESTAÑA HISTÓRICA AISLADA: ESPAÑA ---
     with tab_cinco_anos:
         st.subheader("📊 Análisis de la Serie Histórica de España (2019 - 2025)")
         df_macro = cargar_dataset_maestro_espana()
         
-        # Limpieza estricta de la columna Origen
         df_macro['Origen'] = df_macro['Origen'].astype(str).str.strip()
         
         lista_anos_lustro = sorted(list(df_macro['Año'].unique()), reverse=True)
-        st.info(f"🇪🇸 Base de datos analítica acotada en exclusividad al territorio español. Categoría 'Otros' representada en verde claro.")
+        st.info(f"🇪🇸 Base de datos analítica acotada en exclusividad al territorio español.")
         
         sub_tab_resumen, sub_tab_comparativa, sub_tab_anualizado = st.tabs([
             "📋 Resumen Global", 
@@ -330,25 +337,23 @@ if alertas_activas > 0:
                 )
                 st.plotly_chart(fig_lineas_macro, use_container_width=True)
         
-        # --- SUB-TAB CORREGIDA (Restaurada la lógica interanual limpia por AÑO) ---
         with sub_tab_comparativa:
             st.markdown("##### Evolución estacional mes a mes superponiendo cada año:")
-            tipo_foco_filtro = st.selectbox("Selecciona tipo de anomalía a comparar:", ["Todos", "Incendio Forestal", "Zona Industrial", "Volcán", "Otros"])
+            tipo_foco_filtro = st.sidebar.selectbox("Selecciona tipo de anomalía a comparar:", ["Todos", "Incendio Forestal", "Zona Industrial", "Volcán", "Otros"], key="filtro_foco_sidebar")
             
             df_comp = df_macro.copy()
             if tipo_foco_filtro != "Todos":
                 df_comp = df_comp[df_comp['Origen'] == tipo_foco_filtro]
             
             if not df_comp.empty:
-                # Agrupamos por Año y Mes (independientemente de si es 'Todos' o uno específico)
                 df_comp_agrupado = df_comp.groupby(['Año', 'Mes_Num', 'Mes']).size().reset_index(name='Alertas').sort_values('Mes_Num')
-                df_comp_agrupado['Año'] = df_comp_agrupado['Año'].astype(str) # Convertimos a string para colores discretos por año
+                df_comp_agrupado['Año'] = df_comp_agrupado['Año'].astype(str)
                 
                 fig_cruzado = px.line(
                     df_comp_agrupado, 
                     x='Mes', 
                     y='Alertas', 
-                    color='Año',        # <-- Cada año es una línea de color diferente, ¡como antes!
+                    color='Año',        
                     title=f"Curva Estacional Comparativa en España ({tipo_foco_filtro})", 
                     markers=True
                 )
@@ -395,7 +400,7 @@ if alertas_activas > 0:
                 st.map(df_mapa_anual, latitude='latitude', longitude='longitude', size='frp', color='color_mapa')
             
 else:
-    st.warning("Ningún punto caliente cumple con las condiciones actuales de los filtros aplicados.")
+    st.warning("Ningún punto caliente cumple con las condiciones actuales de los filtros applied.")
 
 if boton_prediccion and modelo_cls is not None:
     dn_num = 1 if dn_in == "Noche" else 0
