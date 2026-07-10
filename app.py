@@ -55,7 +55,14 @@ def descargar_datos_tiempo_real_espana():
             if df_europa.empty:
                 return pd.DataFrame()
                 
-            df_europa['acq_date'] = pd.to_datetime(df_europa['acq_date'])
+            # Combinar acq_date y acq_time para extraer la hora exacta satelital
+            df_europa['acq_time_str'] = df_europa['acq_time'].astype(str).str.zfill(4)
+            df_europa['datetime_str'] = df_europa['acq_date'] + ' ' + df_europa['acq_time_str'].str[:2] + ':' + df_europa['acq_time_str'].str[2:]
+            df_europa['acq_date'] = pd.to_datetime(df_europa['datetime_str'], errors='coerce')
+            
+            if df_europa['acq_date'].isnull().any():
+                df_europa['acq_date'] = pd.to_datetime(df_rt['acq_date'])
+                
             df_europa['Mes'] = df_europa['acq_date'].dt.strftime('%B')
             df_europa['Mes_Num'] = df_europa['acq_date'].dt.month
             df_europa['Horario'] = df_europa['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
@@ -112,9 +119,19 @@ def cargar_dataset_maestro_europa():
             if lon < -10.0 or lon > 60.0 or lat < 34.0 or lat > 68.0:
                 continue
             mes_num = np.random.choice(list(range(1, 13)), p=[0.03, 0.03, 0.04, 0.05, 0.07, 0.15, 0.25, 0.23, 0.09, 0.03, 0.02, 0.01])
-            fecha = datetime.datetime(anio, mes_num, np.random.randint(1, 28))
+            
+            horario = np.random.choice(['☀️ Día', '🌙 Noche'], p=[0.65, 0.35])
+            if horario == '☀️ Día':
+                hora = np.random.randint(8, 20)
+            else:
+                hora = np.random.choice([np.random.randint(0, 8), np.random.randint(20, 24)])
+                
+            minuto = np.random.randint(0, 60)
+            segundo = np.random.randint(0, 60)
+            fecha = datetime.datetime(anio, mes_num, np.random.randint(1, 28), hora, minuto, segundo)
+            
             origen = np.random.choice(['Incendio Forestal', 'Zona Industrial', 'Otros', 'Volcán'], p=[0.70, 0.21, 0.08, 0.01])
-            registros.append({'acq_date': fecha, 'Año': anio, 'Mes_Num': mes_num, 'Mes': meses_nombres[mes_num], 'latitude': lat, 'longitude': lon, 'brightness': np.random.uniform(300.0, 370.0), 'frp': np.random.uniform(5.0, 200.0), 'confidence': np.random.uniform(35, 100), 'Origen': origen, 'Horario': np.random.choice(['☀️ Día', '🌙 Noche'], p=[0.65, 0.35])})
+            registros.append({'acq_date': fecha, 'Año': anio, 'Mes_Num': mes_num, 'Mes': meses_nombres[mes_num], 'latitude': lat, 'longitude': lon, 'brightness': np.random.uniform(300.0, 370.0), 'frp': np.random.uniform(5.0, 200.0), 'confidence': np.random.uniform(35, 100), 'Origen': origen, 'Horario': horario})
     
     df = pd.DataFrame(registros)
     df['Origen'] = df['Origen'].astype(str).str.strip()
@@ -145,14 +162,23 @@ def cargar_dataset_maestro_espana():
             lat = np.random.normal(reg["lat_c"], reg["lat_std"])
             lon = np.random.normal(reg["lon_c"], reg["lon_std"])
             mes_num = np.random.choice(list(range(1, 13)), p=[0.02, 0.03, 0.04, 0.04, 0.05, 0.12, 0.30, 0.26, 0.09, 0.03, 0.01, 0.01])
-            fecha = datetime.datetime(anio, mes_num, np.random.randint(1, 28))
+            
+            horario = np.random.choice(['☀️ Día', '🌙 Noche'], p=[0.60, 0.40])
+            if horario == '☀️ Día':
+                hora = np.random.randint(8, 20)
+            else:
+                hora = np.random.choice([np.random.randint(0, 8), np.random.randint(20, 24)])
+                
+            minuto = np.random.randint(0, 60)
+            segundo = np.random.randint(0, 60)
+            fecha = datetime.datetime(anio, mes_num, np.random.randint(1, 28), hora, minuto, segundo)
             
             if reg["nombre"] == "Islas Canarias" and np.random.rand() < 0.08:
                 origen = 'Volcán'
             else:
                 origen = np.random.choice(['Incendio Forestal', 'Zona Industrial', 'Otros'], p=[0.76, 0.17, 0.07])
             
-            registros.append({'acq_date': fecha, 'Año': anio, 'Mes_Num': mes_num, 'Mes': meses_nombres[mes_num], 'latitude': lat, 'longitude': lon, 'brightness': np.random.uniform(300.0, 365.0), 'frp': np.random.uniform(5.0, 180.0), 'confidence': np.random.uniform(40, 100), 'Origen': origen, 'Horario': np.random.choice(['☀️ Día', '🌙 Noche'], p=[0.60, 0.40])})
+            registros.append({'acq_date': fecha, 'Año': anio, 'Mes_Num': mes_num, 'Mes': meses_nombres[mes_num], 'latitude': lat, 'longitude': lon, 'brightness': np.random.uniform(300.0, 365.0), 'frp': np.random.uniform(5.0, 180.0), 'confidence': np.random.uniform(40, 100), 'Origen': origen, 'Horario': horario})
     
     df = pd.DataFrame(registros)
     df['Origen'] = df['Origen'].astype(str).str.strip()
@@ -251,6 +277,7 @@ if alertas_activas > 0:
             st.info("⚡ Rendimiento Optimizado: Se han filtrado los 150 puntos europeos más críticos para acelerar la renderización.")
             df_mapa = df_mapa.sort_values(by='frp', ascending=False).head(150)
             
+        # RESTAURADO: Uso original de st.map tal como estaba definido antes
         st.map(df_mapa, latitude='latitude', longitude='longitude', size='frp', color='color_mapa')
 
     with tab_temporal:
@@ -270,7 +297,6 @@ if alertas_activas > 0:
             fig_dn = px.histogram(df_filtrado, x='Origen', color='Horario', title="Distribución por Ciclo Solar", barmode='group', color_discrete_sequence=['#E9C46A', '#457B9D'])
             st.plotly_chart(fig_dn, use_container_width=True)
 
-    # --- PESTAÑA DE FÍSICA ACTUALIZADA CON CONTORNOS DE DENSIDAD ---
     with tab_fisica:
         st.subheader("Física Cuantitativa y Firmas Térmicas")
         f_col1, f_col2 = st.columns(2)
@@ -284,17 +310,19 @@ if alertas_activas > 0:
                 y='frp', 
                 title="Curvas de Nivel: Concentración de Temperatura vs Potencia FRP"
             )
-            # Hacemos que las líneas se vean con colores más llamativos e intensos
             fig_disp.update_traces(contours_coloring="fill", colorscale="Viridis")
             st.plotly_chart(fig_disp, use_container_width=True)
 
     with tab_datos:
         st.subheader("Consola de Extracción y Logs Críticos")
-        top_criticos = df_filtrado.sort_values(by='frp', ascending=False).head(15)[['acq_date', 'latitude', 'longitude', 'brightness', 'frp', 'confidence', 'Origen', 'Horario']]
+        top_criticos = df_filtrado.sort_values(by='frp', ascending=False).head(15)[['acq_date', 'latitude', 'longitude', 'brightness', 'frp', 'confidence', 'Origen', 'Horario']].copy()
+        
+        # ACTUALIZACIÓN: Formateo de fecha y hora completa en la columna de logs críticos
+        top_criticos['acq_date'] = top_criticos['acq_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
         top_criticos.columns = ['Fecha / Registro', 'Latitud', 'Longitud', 'Brillo (K)', 'FRP (MW)', 'Confianza (%)', 'Clasificación IA', 'Horario']
         st.dataframe(top_criticos, use_container_width=True, hide_index=True)
 
-    # --- PESTAÑA HISTÓRICA AISLADA: ESPAÑA ---
     with tab_cinco_anos:
         st.subheader("📊 Análisis de la Serie Histórica de España (2019 - 2025)")
         df_macro = cargar_dataset_maestro_espana()
@@ -302,7 +330,7 @@ if alertas_activas > 0:
         df_macro['Origen'] = df_macro['Origen'].astype(str).str.strip()
         
         lista_anos_lustro = sorted(list(df_macro['Año'].unique()), reverse=True)
-        st.info(f"🇪🇸 Base de datos analítica acotada en exclusividad al territorio español.")
+        st.info(f"🇪🇸 Base de datos analítica acotada en exclusividad al territorio español. Categoría 'Otros' representada en verde claro.")
         
         sub_tab_resumen, sub_tab_comparativa, sub_tab_anualizado = st.tabs([
             "📋 Resumen Global", 
