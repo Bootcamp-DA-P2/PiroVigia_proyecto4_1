@@ -7,6 +7,7 @@ import requests
 from io import StringIO
 import datetime
 import warnings
+from geopy.geocoders import Nominatim
 
 # Importamos Folium para crear un mapa interactivo
 import folium
@@ -53,7 +54,8 @@ colores_sistema_espana = {
 # --- FUNCIÓN DE DESCARGA EN TIEMPO REAL (NASA FIRMS) ---
 @st.cache_data(ttl=300) 
 def descargar_datos_tiempo_real():
-    url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/modis-c6.1/csv/MODIS_C6_1_Global_24h.csv"
+    # VIIRS Suomi-NPP C2 Global 24h CSV
+    url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_Global_24h.csv"
     try:
         respuesta = requests.get(url, timeout=10)
         if respuesta.status_code == 200:
@@ -75,6 +77,17 @@ def descargar_datos_tiempo_real():
             df_europa['acq_date'] = pd.to_datetime(df_europa['datetime_str'], errors='coerce')
             df_europa['Horario'] = df_europa['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
             
+            # Adaptamos campos de VIIRS (bright_ti4 y bright_ti5) si la IA requiere el modelo de MODIS antiguo
+            if 'brightness' not in df_europa.columns and 'bright_ti4' in df_europa.columns:
+                df_europa['brightness'] = df_europa['bright_ti4']
+            if 'bright_t31' not in df_europa.columns and 'bright_ti5' in df_europa.columns:
+                df_europa['bright_t31'] = df_europa['bright_ti5']
+            
+            # En VIIRS el 'confidence' suele venir mapeado como nominal ('low', 'nominal', 'high') 
+            # Lo convertimos a una escala numérica para compatibilidad con sliders y pipelines
+            if df_europa['confidence'].dtype == object:
+                df_europa['confidence'] = df_europa['confidence'].str.strip().str.lower().map({'low': 30.0, 'nominal': 70.0, 'high': 100.0}).fillna(50.0)
+
             if modelo_cls is not None and scaler_cls is not None:
                 dn_num = np.where(df_europa['daynight'].astype(str).str.strip().str.upper() == 'N', 1, 0)
                 X_pred = pd.DataFrame({
@@ -261,6 +274,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 if total_focos > 0:
     m = folium.Map(
         location=centro_inicial, 
@@ -316,21 +330,42 @@ if total_focos > 0:
         group = MarkerCluster(name="Clusters de Contraste Inteligente", icon_create_function=icon_create_function).add_to(m)
     else:
         group = folium.FeatureGroup(name="Focos Individuales").add_to(m)
-        
-    df_render = df_filtrado.head(1200)
+
+# Iniciamos localizador
+    # geolocator = Nominatim(user_agent="pirovigia_live_pro_locator") 
+
+    df_render = df_filtrado.head(300)
     
     for idx, row in df_render.iterrows():
         tipo = row['Origen']
         color_foco = paleta_activa.get(tipo, '#E63946')
+
+        # --- Obtención de la localidad en tiempo real ---
+        # localidad = "Buscando..."
+        # try:
+            # Hacemos la consulta inversa usando la latitud y longitud del foco
+            # ubicacion = geolocator.reverse((row['latitude'], row['longitude']), timeout=2)
+            # if ubicacion and 'address' in ubicacion.raw:
+                # direccion = ubicacion.raw['address']
+                # Buscamos de forma jerárquica el nombre del pueblo, ciudad o municipio
+                # localidad = direccion.get('village', 
+                            #direccion.get('town', 
+                            #direccion.get('city', 
+                            #direccion.get('municipality', 
+                            #direccion.get('county', 'Área no urbana')))))
+            #else:
+                #localidad = "Coordenadas aisladas"
+        #except Exception:
+            #localidad = "No disponible (Sin conexión)"
         
         html_popup = f"""
         <div style='font-family: Arial, sans-serif; width: 230px;'>
             <h4 style='margin:0 0 5px 0; color:{color_foco};'>{tipo}</h4>
-            <hr style='margin:5px 0;'>
+            <hr style='margin:5px 0; border:0; border-top:1px solid #ccc;'>
             <b>📅 Registro:</b> {row['acq_date'].strftime('%d/%m/%Y %H:%M:%S')}<br>
             <b>🔥 Energía FRP:</b> {row['frp']:.2f} MW<br>
             <b>🎯 Confianza:</b> {row['confidence']}%<br>
-            <b>🌍 Ubicación:</b> {row['latitude']:.4f}, {row['longitude']:.4f}
+            <p style='color: #007BFF; margin: 5px 0 0 0; font-size: 11px;'><i>👉 Haz clic para identificar localidad</i></p>
         </div>
         """
         
@@ -339,7 +374,7 @@ if total_focos > 0:
         marker = folium.CircleMarker(
             location=[row['latitude'], row['longitude']],
             radius=radio_calculado,
-            popup=folium.Popup(html_popup, max_width=280),
+            popup=folium.Popup(html_popup, max_width=250),
             color=color_foco,
             fill=True,
             fill_color=color_foco,
@@ -351,9 +386,60 @@ if total_focos > 0:
         marker.add_to(group)
         
     folium.LayerControl().add_to(m)
-    st_folium(m, width="100%", height=600, key="tactical_perfect_map_v11")
-else:
+    #st_folium(m, width="100%", height=600, key="tactical_perfect_map_v11")
+#else:
+    # st.info("💡 Ningún punto caliente registrado coincide con las tolerancias de los filtros actuales.")
+
+# 2. Renderizamos el mapa capturando la interacción del usuario
+mapa_retorno = st_folium(m, width="100%", height=600, key="tactical_perfect_map_v11")
+
+# 3. INTERSECCIÓN INTERACTIVA: Si el usuario pincha en un foco, calculamos su pueblo al instante
+if total_focos == 0:
     st.info("💡 Ningún punto caliente registrado coincide con las tolerancias de los filtros actuales.")
+elif mapa_retorno and mapa_retorno.get("last_object_clicked") is not None:
+    click_coords = mapa_retorno["last_object_clicked"]
+    lat_click = click_coords.get("lat")
+    lon_click = click_coords.get("lng")
+    
+    if lat_click and lon_click:
+        
+        @st.cache_data(ttl=3600)  # Guardamos en caché local para no repetir peticiones a las mismas coordenadas
+        def obtener_localidad_click(lat, lon):
+            try:
+                geolocator = Nominatim(user_agent="pirovigia_live_click")
+                # ubicacion = geolocator.reverse((lat, lon), timeout=2)
+                #if ubicacion and 'address' in ubicacion.raw:
+                #    addr = ubicacion.raw['address']
+                #    return addr.get('village', addr.get('town', addr.get('city', addr.get('suburb', 'Término Municipal'))))
+            #except:
+            #    pass
+            #return "Zona forestal / Sin especificar"
+                res = geolocator.reverse((lat, lon), exactly_one=True, timeout=3)
+                if res and 'address' in res.raw:
+                    addr = res.raw['address']
+                    return addr.get(
+                        'village',
+                        addr.get(
+                            'town',
+                            addr.get(
+                                'city',
+                                addr.get('municipality', 'Área no urbana')
+                            )
+                        )
+                    )
+            except Exception:
+                pass
+            return "No disponible"
+
+        nombre_pueblo = obtener_localidad_click(lat_click, lon_click)
+        
+        # Mostramos un banner informativo dinámico en streamlit al pinchar
+        # st.success(f"📍 **Foco seleccionado:** Ubicado en la zona de **{nombre_pueblo}** ({lat_click:.4f}, {lon_click:.4f})")
+        st.info(
+            f"📍 **Foco seleccionado:** Ubicado en la zona de **{nombre_pueblo}** ({lat_click:.4f}, {lon_click:.4f})"
+        )
+else: 
+    st.info("💡 Haz clic en un foco del mapa para identificar su localidad aproximada.")
 
 # --- FEED DE DATOS BAJO EL MAPA ---
 if total_focos > 0:
