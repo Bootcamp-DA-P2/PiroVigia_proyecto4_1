@@ -5,6 +5,7 @@ import plotly.express as px
 import datetime
 import warnings
 import requests
+import swifter
 from io import StringIO
 from geopy.geocoders import Nominatim
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,8 +18,12 @@ from folium.plugins import MarkerCluster
 # ---- SESIÓN HTTP ----
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "PiroVigia/2.0"
+    "User-Agent": "PiroVigia/2.0",
+    "Accept-Encoding": "gzip, deflate"
 })
+# Reutiliza conexiones abiertas para no renegociar TLS en cada llamada
+adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+session.mount('https://', adapter)
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
@@ -70,33 +75,37 @@ def clasificar_origen(row):
 @st.cache_data
 def cargar_csv():
     try:
-        df = pd.read_csv("data/20-26focos_calor.csv")
+        return pd.read_feather("data/20-26focos_calor_procesado.feather") # Lee directamente el archivo preprocesado
+    except Exception:
+        st.error("No se encontró el archivo.") # Respaldo por si no se encuentra el archivo
+        return pd.DataFrame()
+        #df = pd.read_csv("data/20-26focos_calor.csv")
         # Convertimos nombres de columnas a minúsculas para compatibilidad
-        df.columns = [col.split(',')[0].lower() for col in df.columns]
+        #df.columns = [col.split(',')[0].lower() for col in df.columns]
         # Conversión de fechas
-        df['acq_time_str'] = df['acq_time'].astype(str).str.zfill(4)
-        df['datetime_str'] = df['acq_date'] + ' ' + df['acq_time_str'].str[:2] + ':' + df['acq_time_str'].str[2:]
-        df['acq_date'] = pd.to_datetime(df['datetime_str'], errors='coerce')
-        df['horario'] = df['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
+        #df['acq_time_str'] = df['acq_time'].astype(str).str.zfill(4)
+        #df['datetime_str'] = df['acq_date'] + ' ' + df['acq_time_str'].str[:2] + ':' + df['acq_time_str'].str[2:]
+        #df['acq_date'] = pd.to_datetime(df['datetime_str'], errors='coerce')
+        #df['horario'] = df['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
         
         
         # Robusto frente a distintos dtypes de pandas (object, string[pyarrow], etc.)
-        if not pd.api.types.is_numeric_dtype(df['confidence']):
-            df['confidence'] = (
-                df['confidence'].astype(str).str.strip().str.lower()
-                .map({'l': 30.0, 'n': 70.0, 'h': 100.0})
-                .fillna(50.0)
-            )
-        else:
-            df['confidence'] = pd.to_numeric(df['confidence'], errors='coerce').fillna(50.0)
+        #if not pd.api.types.is_numeric_dtype(df['confidence']):
+        #    df['confidence'] = (
+        #        df['confidence'].astype(str).str.strip().str.lower()
+        #        .map({'l': 30.0, 'n': 70.0, 'h': 100.0})
+        #        .fillna(50.0)
+        #    )
+        #else:
+        #    df['confidence'] = pd.to_numeric(df['confidence'], errors='coerce').fillna(50.0)
 
-        df['Año'] = df['acq_date'].dt.year
-        df['Origen'] = df.apply(clasificar_origen, axis=1)
-        df['Region'] = df.apply(asociar_region, axis=1)
-        return df
-    except Exception as e:
-        st.error(f"Error al cargar el CSV local: {e}")
-        return pd.DataFrame()
+        #df['Año'] = df['acq_date'].dt.year
+        #df['Origen'] = df.swifter.apply(clasificar_origen, axis=1)
+        #df['Region'] = df.swifter.apply(asociar_region, axis=1)
+        #return df
+    #except Exception as e:
+        #st.error(f"Error al cargar el CSV local: {e}")
+        #return pd.DataFrame()
     
 # --- CARGA DE DATOS EN TIEMPO REAL (NASA FIRMS) ---
 @st.cache_data(ttl=300) 
@@ -525,27 +534,30 @@ if total_focos > 0:
 # Renderizamos hasta 600 puntos para optimizar la carga del navegador
     df_render = df_filtrado.head(600)
     
-    for idx, row in df_render.iterrows():
-        tipo = row['Origen']
+    for row in df_filtrado.itertuples():
+        tipo = getattr(row, 'Origen')
         color_foco = paleta_activa.get(tipo, '#E63946')
-        # Evitamos errores si el frp es nulo o 0
-        frp_seguro = row['frp'] if not pd.isnull(row['frp']) and row['frp'] > 0 else 5.0
+        frp_val = getattr(row, 'frp', 5.0)
+        frp_seguro = frp_val if not pd.isnull(frp_val) and frp_val > 0 else 5.0
+    
+        fecha_val = getattr(row, 'acq_date')
+        fecha_fmt = fecha_val.strftime('%d/%m/%Y %H:%M:%S') if pd.notnull(fecha_val) else 'N/A'
         
         html_popup = f"""
         <div style='font-family: Arial, sans-serif; width: 230px;'>
             <h4 style='margin:0 0 5px 0; color:{color_foco};'>{tipo}</h4>
             <hr style='margin:5px 0; border:0; border-top:1px solid #ccc;'>
-            <b>📅 Captura:</b> {row['acq_date'].strftime('%d/%m/%Y %H:%M:%S') if not pd.isnull(row['acq_date']) else 'N/A'}<br>
-            <b>🔥 Energía FRP:</b> {row['frp']:.2f} MW<br>
-            <b>🎯 Confianza:</b> {row['confidence']}%<br>
+            <b>📅 Captura:</b> {fecha_fmt}<br>
+            <b>🔥 Energía FRP:</b> {frp_seguro:.2f} MW<br>
+            <b>🎯 Confianza:</b> {getattr(row, 'confidence', 50)}%<br>
             <p style='color: #007BFF; margin: 5px 0 0 0; font-size: 11px;'><i>👉 Haz clic para ubicar localidad</i></p>
         </div>
         """
         
-        radio_calculado = max(int(np.sqrt(row['frp']) * 2.2), 6)
+        radio_calculado = max(int(np.sqrt(frp_seguro)* 2.2), 6)
         
         marker = folium.CircleMarker(
-            location=[row['latitude'], row['longitude']],
+            location=[getattr(row,'latitude'), getattr(row, 'longitude')],
             radius=radio_calculado,
             popup=folium.Popup(html_popup, max_width=250),
             color=color_foco,
