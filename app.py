@@ -8,6 +8,7 @@ import requests
 from io import StringIO
 from geopy.geocoders import Nominatim
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import sqlite3
 
 # Importamos Folium para crear un mapa interactivo
 import folium
@@ -265,6 +266,32 @@ def descarga_tiempo_real(rango_dias=1):
 
     df_espana['Año'] = df_espana['acq_date'].dt.year
     df_espana['Origen'] = df_espana.apply(clasificar_origen, axis=1)
+
+
+    # --- GUARDADO AUTOMÁTICO EN BASE DE DATOS ---
+    try:
+        # 1. Conectamos a la base de datos (se creará el archivo si no existe)
+        conexion = sqlite3.connect("Base-de-datos/pirovigia.db")
+        
+        # 2. Preparamos una copia del dataframe solo con las columnas que queremos guardar
+        df_para_bd = df_espana.copy()
+        
+        # Renombramos la columna 'Origen' a 'origen_calculado' para que coincida con la tabla SQL
+        df_para_bd.rename(columns={'Origen': 'origen_calculado'}, inplace=True)
+        
+        # Eliminamos columnas temporales que creaste para cálculos internos y que no están en SQL
+        columnas_a_ignorar = ['datetime_str', 'acq_time_str', 'horario', 'Año', 'Region', 'satelite_sensor']
+        df_para_bd = df_para_bd.drop(columns=[col for col in columnas_a_ignorar if col in df_para_bd.columns], errors='ignore')
+        
+        # 3. Guardamos en la tabla SQL (append = añade al final sin borrar lo anterior)
+        df_para_bd.to_sql("detecciones_tiemporeal", conexion, if_exists="append", index=False)
+        
+        conexion.close()
+        st.sidebar.success("💾 Datos guardados en la base de datos local.")
+        
+    except Exception as e:
+        st.sidebar.error(f"Error al guardar en base de datos: {e}")
+
     
     return df_espana
 
