@@ -41,15 +41,12 @@ def clasificar_origen(row):
     lat, lon = row['latitude'], row['longitude']
     frp = row['frp']
     horario = row['horario']
-    # Obtenmos brightness (csv local) o bright_ti24 (real time); si no existieran, usamos un valor neutro por defecto de 300
     bright = row.get('brightness', row.get('bright_ti24', 300.0))
 
-    # 1. Volcanes (Canarias)
     if (27.5 <= lat <= 29.5) and (-18.0 <= lon <= -13.0):
         if frp > 120 and bright > 345:
             return 'Zona volcánica'
 
-    # 2. Zonas industriales
     focos_industriales = [
         {"nombre": "Polo Químico Huelva", "lat": 37.2, "lon": -6.9, "radio": 0.15},
         {"nombre": "Refinería San Roque / Algeciras", "lat": 36.18, "lon": -5.4, "radio": 0.1},
@@ -65,53 +62,22 @@ def clasificar_origen(row):
         if dist <= foco["radio"]:
             return 'Zona industrial'
         
-    # 3. Otros (quemas agrícolas, reflejos solares)
     if frp < 3.0 and horario == '☀️ Día':
         return 'Otros'
     
-    # 4. Incendio forestal (por defecto)
     return 'Incendio forestal'
 
 # --- CARGA DEL CSV LOCAL (histórico 2020-2026)---
 @st.cache_data
 def cargar_csv():
     try:
-        return pd.read_feather("data/20-26focos_calor_procesado.feather") # Lee directamente el archivo preprocesado
+        return pd.read_feather("data/20-26focos_calor_procesado.feather")
     except Exception:
-        st.error("No se encontró el archivo.") # Respaldo por si no se encuentra el archivo
+        st.error("No se encontró el archivo.")
         return pd.DataFrame()
-        #df = pd.read_csv("data/20-26focos_calor.csv")
-        # Convertimos nombres de columnas a minúsculas para compatibilidad
-        #df.columns = [col.split(',')[0].lower() for col in df.columns]
-        # Conversión de fechas
-        #df['acq_time_str'] = df['acq_time'].astype(str).str.zfill(4)
-        #df['datetime_str'] = df['acq_date'] + ' ' + df['acq_time_str'].str[:2] + ':' + df['acq_time_str'].str[2:]
-        #df['acq_date'] = pd.to_datetime(df['datetime_str'], errors='coerce')
-        #df['horario'] = df['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
-        
-        
-        # Robusto frente a distintos dtypes de pandas (object, string[pyarrow], etc.)
-        #if not pd.api.types.is_numeric_dtype(df['confidence']):
-        #    df['confidence'] = (
-        #        df['confidence'].astype(str).str.strip().str.lower()
-        #        .map({'l': 30.0, 'n': 70.0, 'h': 100.0})
-        #        .fillna(50.0)
-        #    )
-        #else:
-        #    df['confidence'] = pd.to_numeric(df['confidence'], errors='coerce').fillna(50.0)
 
-        #df['Año'] = df['acq_date'].dt.year
-        #df['Origen'] = df.swifter.apply(clasificar_origen, axis=1)
-        #df['Region'] = df.swifter.apply(asociar_region, axis=1)
-        #return df
-    #except Exception as e:
-        #st.error(f"Error al cargar el CSV local: {e}")
-        #return pd.DataFrame()
-    
-# --- CARGA DE DATOS EN TIEMPO REAL (NASA FIRMS) ---
 @st.cache_data(ttl=300) 
 
-# --- FILTRADO GEOGRÁFICO DE REGIONES (EXCLUSIÓN DE ÁFRICA) ---
 def asociar_region(row):
     lat, lon = row['latitude'], row['longitude']
     mejor_region = None
@@ -171,18 +137,13 @@ def asociar_region(row):
                 
     return mejor_region
 
-# rango_dias controla cuántos días hacia atrás solicitar a la API (por defecto 1 = últimas 24h)
 def descarga_tiempo_real(rango_dias=1):
-    # Recuperamos MAP_KEY de los secretos
     try: 
         MAP_KEY = st.secrets["nasa_map_key"]
-    # Clave de respaldo por si falla la carga del archivo secrets.toml
     except Exception:
         MAP_KEY = "31b2805e7d68126bba3d47e6a00ddeba"
     
-    # Caja delimitadora estricta para España (para evitar descargar datos mundiales innecesarios)
     bbox_espana = "-19,27,5,44"
-    # Listado de los 3 sensores VIIRS de alta resolución activa (375m)
     sensores = ["VIIRS_NOAA20_NRT", "VIIRS_SNPP_NRT", "VIIRS_NOAA21_NRT"]
 
     def descargar_sensor(sensor, api_key):
@@ -192,11 +153,9 @@ def descarga_tiempo_real(rango_dias=1):
         )
         try:
             respuesta = session.get(url, timeout=20)
-            # Verificación estándar de HTTP
             if respuesta.status_code != 200:
                 print(f"Error en sensor {sensor}: Código de respuesta {respuesta.status_code}")
                 return None
-            # Verificación de errores de API
             texto_respuesta = respuesta.text.strip()
             if "Bad Map Key" in texto_respuesta or "Invalid" in texto_respuesta:
                 print(f"Error en sensor {sensor}: MAP_KEY inválida o rechazada por la NASA")
@@ -205,14 +164,11 @@ def descarga_tiempo_real(rango_dias=1):
             if not texto_respuesta or "No data available" in texto_respuesta:
                 return None
 
-            # Conversión a dataframe
             df = pd.read_csv(StringIO(texto_respuesta))
             if df.empty:
                 return None
-            # Estandarizamos los nombres de las columnas a minúsculas
             df.columns = [c.lower() for c in df.columns]
 
-            # Saneamos columnas críticas asegurando tipos numéricos
             df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
             df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
             df['frp'] = pd.to_numeric(df['frp'], errors='coerce').fillna(0.0)
@@ -229,7 +185,6 @@ def descarga_tiempo_real(rango_dias=1):
     
     df_acumulado = []
 
-    # Realizamos una petición secuencial segura
     for s in sensores:
         res = descargar_sensor(s, MAP_KEY)
         if res is not None and not res.empty:
@@ -239,31 +194,23 @@ def descarga_tiempo_real(rango_dias=1):
         print("No se ha detectado ningún foco activo de VIIRS de las últimas 24 horas")
         return pd.DataFrame()
 
-    # Concatenamos satélites
     df_total = pd.concat(df_acumulado, ignore_index=True)
     
-    # --- ELIMINACIÓN INTELIGENTE DE DUPLICADOS ---
-    # Si dos satélites pasan casi a la vez, pueden registrar coordenadas idénticas.
-    # Redondeamos a 3 decimales (aprox. 100 metros de precisión) para detectar duplicados en el mismo foco.
     df_total['lat_redond'] = df_total['latitude'].round(3)
     df_total['lon_redond'] = df_total['longitude'].round(3)
     
-    # Nos quedamos con el registro que tenga mayor FRP (intensidad de fuego) si hay solapamiento de coordenadas
     df_total = df_total.sort_values(by='frp', ascending=False)
 
-    # Convertimos acq_date a string temporal para evitar conflictos de tipo en drop_duplicates
     df_total['acq_date_str'] = df_total['acq_date'].astype(str)
     df_total = df_total.drop_duplicates(subset=['lat_redond', 'lon_redond', 'acq_date', 'acq_time'], keep='first')
     df_total = df_total.drop(columns=['lat_redond', 'lon_redond', 'acq_date_str'])
  
-    
     df_total['Region'] = df_total.apply(asociar_region, axis=1)
     df_espana = df_total[df_total['Region'].notna()].copy()
 
     if df_espana.empty:
         return pd.DataFrame()
     
-    # Procesamiento final de tipos de datos y mapeos
     df_espana['acq_time_str'] = df_espana['acq_time'].astype(str).str.split('.').str[0].str.zfill(4)
     df_espana['datetime_str'] = df_espana['acq_date'].astype(str).str.split(' ').str[0] + ' ' + df_espana['acq_time_str'].str[:2] + ':' + df_espana['acq_time_str'].str[2:]
     df_espana['acq_date'] = pd.to_datetime(df_espana['datetime_str'], errors='coerce')
@@ -276,23 +223,16 @@ def descarga_tiempo_real(rango_dias=1):
     df_espana['Año'] = df_espana['acq_date'].dt.year
     df_espana['Origen'] = df_espana.apply(clasificar_origen, axis=1)
 
-
-    # --- GUARDADO AUTOMÁTICO EN BASE DE DATOS ---
     try:
-        # 1. Conectamos a la base de datos (se creará el archivo si no existe)
         conexion = sqlite3.connect("Base-de-datos/pirovigia.db")
         
-        # 2. Preparamos una copia del dataframe solo con las columnas que queremos guardar
         df_para_bd = df_espana.copy()
         
-        # Renombramos la columna 'Origen' a 'origen_calculado' para que coincida con la tabla SQL
         df_para_bd.rename(columns={'Origen': 'origen_calculado'}, inplace=True)
         
-        # Eliminamos columnas temporales que creaste para cálculos internos y que no están en SQL
         columnas_a_ignorar = ['datetime_str', 'acq_time_str', 'horario', 'Año', 'Region', 'satelite_sensor']
         df_para_bd = df_para_bd.drop(columns=[col for col in columnas_a_ignorar if col in df_para_bd.columns], errors='ignore')
         
-        # 3. Guardamos en la tabla SQL (append = añade al final sin borrar lo anterior)
         df_para_bd.to_sql("detecciones_tiemporeal", conexion, if_exists="append", index=False)
         
         conexion.close()
@@ -301,20 +241,15 @@ def descarga_tiempo_real(rango_dias=1):
     except Exception as e:
         st.sidebar.error(f"Error al guardar en base de datos: {e}")
 
-    
     return df_espana
 
 
-# --- ALERTAS RÁPIDAS COPERNICUS --- 
 @st.cache_data(ttl=600)
 def descarga_alertas_terrestres(rango_dias=1):
-    # Usamos la API key de tus secretos
     MAP_KEY = st.secrets.get("nasa_map_key", "31b2805e7d68126bba3d47e6a00ddeba") 
     
-    # Caja delimitadora estricta para España
     bbox_espana = "-19,27,5,44"
 
-    # Sensor MODIS (Terra y Aqua), estándar de calibración terrestre internacional
     sensor = "MODIS_NRT"
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{MAP_KEY}/{sensor}/{bbox_espana}/{rango_dias}"
     
@@ -335,14 +270,11 @@ def descarga_alertas_terrestres(rango_dias=1):
             st.sidebar.info("Sin focos terrestres MODIS en las últimas 24 horas.")
             return pd.DataFrame()
             
-        # Normalizamos nombres de columnas a minúsculas
         df_temp.columns = [col.lower() for col in df_temp.columns]
         
-        # Estructuramos los datos para asimilarlos como Alerta Terrestre Oficial
         df_temp['Origen'] = "Alerta Terrestre Oficial"
         df_temp['Region'] = "Reporte Oficial"
         
-        # MODIS usa confianza de 0 a 100 directamente en formato numérico
         df_temp['confidence'] = pd.to_numeric(df_temp['confidence'], errors='coerce').fillna(100.0)
         
         st.sidebar.success(f"✓ ¡{len(df_temp)} Alertas Terrestres (MODIS) integradas con éxito!")
@@ -378,14 +310,11 @@ if modo_datos == "🔴 Satélites NASA (Tiempo real 24h España)":
         df_origen = df_sat
     else: df_origen = df_terr
 
-    # Formateo de seguridad de tiempos y tipos para el DataFrame unificado
     if not df_origen.empty:
-        # Aseguramos que acq_time sea string y tenga 4 caracteres (ej. '0430')
         df_origen['acq_time_str'] = df_origen['acq_time'].astype(str).str.split('.').str[0].str.zfill(4)
         df_origen['datetime_str'] = df_origen['acq_date'].astype(str).str.split(' ').str[0] + ' ' + df_origen['acq_time_str'].str[:2] + ':' + df_origen['acq_time_str'].str[2:]
         df_origen['acq_date'] = pd.to_datetime(df_origen['datetime_str'], errors='coerce').fillna(df_origen['acq_date'])
         
-        # Mapeamos el horario
         if 'daynight' in df_origen.columns:
             df_origen['horario'] = df_origen['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
 else:
@@ -394,10 +323,8 @@ else:
 # --- FILTROS TÁCTICOS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtros de amenaza")
-# Unimos las categorías clásicas con las que realmente existan en los datos descargados
 categorias_base = ['Incendio forestal', 'Zona industrial', 'Zona volcánica', 'Otros', 'Alerta Terrestre Oficial']
 if not df_origen.empty:
-    # Obtenemos los valores únicos reales y añadimos "Alerta Terrestre Oficial" si no estuviera ya
     opciones_disponibles = list(set(categorias_base) | set(df_origen['Origen'].unique()))
 else:
     opciones_disponibles = categorias_base
@@ -405,20 +332,17 @@ else:
 filtro_origen = st.sidebar.multiselect(
     "Tipo de amenaza / Origen:",
     options=opciones_disponibles,
-    default=opciones_disponibles  # Marca todas por defecto al iniciar
+    default=opciones_disponibles
 )
 
 conf_min = st.sidebar.slider("Confianza Mínima Satélite (%)", 0, 100, 0)
 frp_min = st.sidebar.slider("Potencia Infrarroja FRP > (MW)", 0, 50, 0)
 usar_clusters = st.sidebar.checkbox("Agrupar focos densos (Clusters)", value=True)
 
-# Filtro geográfico
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtros geográficos")
 
-# Extraemos las comunidades autónomas únicas que estén presentes en los datos
 if not df_origen.empty and 'Region' in df_origen.columns:
-    # Filtramos nulos por seguridad y ordenamos alfabéticamente
     comunidades_disponibles = sorted(df_origen['Region'].dropna().unique())
 else:
     comunidades_disponibles = ["Andalucía", "Aragón", "Asturias", "Baleares", "Canarias", "Cantabria", "Castilla-La Mancha", "Castilla y León", "Cataluña", "Comunidad Valenciana", "Extremadura", "Galicia", "La Rioja", "Madrid", "Navarra", "País Vasco", "Región de Murcia"]
@@ -426,20 +350,17 @@ else:
 filtro_comunidades = st.sidebar.multiselect(
     "Selecciona la Comunidad Autónoma:",
     options=comunidades_disponibles,
-    default=comunidades_disponibles, # Todas activas por defecto
+    default=comunidades_disponibles,
     help="Filtra los focos térmicos según la comunidad asignada"
 )
 
-# Filtro anual (solo para CSV local)
 if modo_datos == "📊 Histórico local" and not df_origen.empty:
     lista_anos = sorted(list(df_origen['Año'].unique()))
     if len(lista_anos) > 1:
         rango_anos = st.sidebar.slider("Filtrar por ventana anual:", min_value=lista_anos[0], max_value=lista_anos[-1], value=(lista_anos[0], lista_anos[-1]))
         df_origen = df_origen[(df_origen['Año'] >= rango_anos[0]) & (df_origen['Año'] <= rango_anos[1])]
 
-# Aplicación final de los filtros
 if not df_origen.empty:
-    # Las Alertas Terrestres Oficiales se muestran siempre que estén seleccionadas, saltándose los filtros de calidad del satélite
     es_alerta_terrestre = df_origen['Origen'] == 'Alerta Terrestre Oficial'
     
     mask_comunidad = df_origen['Region'].isin(filtro_comunidades) | (df_origen['Region'].isna())
@@ -454,13 +375,12 @@ if not df_origen.empty:
 else:
     df_filtrado = pd.DataFrame()
 
-# Paleta de colores
 paleta_activa = {
-    'Incendio forestal': '#E63946',  # Rojo Alerta
-    'Zona volcánica': '#FF6B00',            # Naranja Volcánico
-    'Zona industrial': '#FFD166',   # Amarillo Industrial
-    'Otros': '#4EA8DE',              # Azul / Otros
-    'Alerta Terrestre Oficial': '#9B5DE5' # Violeta táctico para reportes de emergencias
+    'Incendio forestal': '#E63946',
+    'Zona volcánica': '#FF6B00',
+    'Zona industrial': '#FFD166',
+    'Otros': '#4EA8DE',
+    'Alerta Terrestre Oficial': '#9B5DE5'
 }
 
 estilo_mapa = "OpenStreetMap (Base)"
@@ -472,7 +392,6 @@ tiles_dict = {
 st.markdown("<h1 style='text-align: center; margin-bottom: 0px;'>🛰️ Visor Táctico PiroVigía Live Pro</h1>", unsafe_allow_html=True)
 st.markdown(f"<p style='text-align: center; color: gray;'>Origen de datos activo: <b>{modo_datos}</b></p>", unsafe_allow_html=True)
 
-# Cálculo de KPIs
 total_focos = len(df_filtrado)
 max_potencia = df_filtrado['frp'].max() if total_focos > 0 else 0.0
 focos_forestales = len(df_filtrado[df_filtrado['Origen'] == 'Incendio forestal']) if total_focos > 0 else 0
@@ -486,7 +405,6 @@ with k4: st.metric("Porcentaje de Incendios", f"{area_afectada_ratio:.1f}%")
 
 st.markdown("### 🗺️ Situación Cartográfica Activa")
 
-# Estilo para los Clusters de Folium
 st.markdown("""
 <style>
     .leaflet-marker-icon.folium-cluster-tactico {
@@ -498,6 +416,22 @@ st.markdown("""
 
 centro_inicial = [40.4167, -3.7037]
 zoom_inicial = 6
+
+# --- FIX DE RENDIMIENTO: límite real de puntos a dibujar ---
+# Antes se calculaba df_render pero el bucle usaba df_filtrado completo,
+# lo que en modo histórico podía intentar dibujar cientos de miles de
+# CircleMarker. Ahora limitamos de verdad y usamos una muestra aleatoria
+# representativa cuando se supera el límite.
+LIMITE_RENDER = 1500
+
+if total_focos > LIMITE_RENDER:
+    df_render = df_filtrado.sample(LIMITE_RENDER, random_state=42)
+    st.caption(
+        f"⚠️ Mostrando una muestra aleatoria de {LIMITE_RENDER:,} de {total_focos:,} "
+        f"focos para mantener el mapa fluido. Usa los filtros para acotar el resultado."
+    )
+else:
+    df_render = df_filtrado
 
 if total_focos > 0:
     m = folium.Map(
@@ -558,10 +492,8 @@ if total_focos > 0:
     else:
         group = folium.FeatureGroup(name="Focos Individuales").add_to(m)
 
-# Renderizamos hasta 600 puntos para optimizar la carga del navegador
-    df_render = df_filtrado.head(600)
-    
-    for row in df_filtrado.itertuples():
+    # --- FIX: iteramos sobre df_render (limitado), no sobre df_filtrado completo ---
+    for row in df_render.itertuples():
         tipo = getattr(row, 'Origen')
         color_foco = paleta_activa.get(tipo, '#E63946')
         frp_val = getattr(row, 'frp', 5.0)
