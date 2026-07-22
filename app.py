@@ -67,13 +67,58 @@ def clasificar_origen(row):
     
     return 'Incendio forestal'
 
-# --- CARGA DEL CSV LOCAL (histórico 2020-2026)---
-@st.cache_data
-def cargar_csv():
+@st.cache_data(ttl=3600)  # Caché de 1 hora
+def cargar_historico_sqlite(db_path="Base-de-datos/pirovigia.db"):
     try:
-        return pd.read_feather("data/20-26focos_calor_procesado.feather")
-    except Exception:
-        st.error("No se encontró el archivo.")
+        conn = sqlite3.connect(db_path)
+        
+        # Comprobamos si la tabla de histórico existe
+        query_check = "SELECT name FROM sqlite_master WHERE type='table' AND name='detecciones';"
+        if pd.read_sql_query(query_check, conn).empty:
+            conn.close()
+            st.warning("⚠️ La tabla 'detecciones' no existe en la base de datos.")
+            return pd.DataFrame()
+        
+        df_bd = pd.read_sql_query("SELECT * FROM detecciones", conn)
+        conn.close()
+        
+        if not df_bd.empty:
+            # 1. Normalizar columnas a minúsculas para consistencia
+            df_bd.columns = [c.lower() for c in df_bd.columns]
+            
+            # Asegurar numéricos clave
+            for col in ['latitude', 'longitude', 'frp', 'confidence']:
+                if col in df_bd.columns:
+                    df_bd[col] = pd.to_numeric(df_bd[col], errors='coerce').fillna(0.0)
+            
+            # 2. Formato de fecha y Año
+            if 'acq_date' in df_bd.columns:
+                df_bd['acq_date'] = pd.to_datetime(df_bd['acq_date'], errors='coerce')
+                df_bd['Año'] = df_bd['acq_date'].dt.year
+            
+            # 3. Calcular 'horario' si no existe
+            if 'horario' not in df_bd.columns:
+                if 'daynight' in df_bd.columns:
+                    df_bd['horario'] = df_bd['daynight'].astype(str).str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
+                else:
+                    df_bd['horario'] = '☀️ Día'
+            
+            # 4. Asignar 'Region' si no existe
+            if 'region' in df_bd.columns:
+                df_bd['Region'] = df_bd['region']
+            elif 'Region' not in df_bd.columns:
+                df_bd['Region'] = df_bd.apply(asociar_region, axis=1)
+                
+            # 5. Clasificar 'Origen' si no existe
+            if 'origen' in df_bd.columns:
+                df_bd['Origen'] = df_bd['origen']
+            elif 'Origen' not in df_bd.columns:
+                df_bd['Origen'] = df_bd.apply(clasificar_origen, axis=1)
+
+        return df_bd
+
+    except Exception as e:
+        st.error(f"Error al cargar el histórico desde SQLite: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=300) 
@@ -223,23 +268,6 @@ def descarga_tiempo_real(rango_dias=1):
     df_espana['Año'] = df_espana['acq_date'].dt.year
     df_espana['Origen'] = df_espana.apply(clasificar_origen, axis=1)
 
-    try:
-        conexion = sqlite3.connect("Base-de-datos/pirovigia.db")
-        
-        df_para_bd = df_espana.copy()
-        
-        df_para_bd.rename(columns={'Origen': 'origen_calculado'}, inplace=True)
-        
-        columnas_a_ignorar = ['datetime_str', 'acq_time_str', 'horario', 'Año', 'Region', 'satelite_sensor']
-        df_para_bd = df_para_bd.drop(columns=[col for col in columnas_a_ignorar if col in df_para_bd.columns], errors='ignore')
-        
-        df_para_bd.to_sql("detecciones_tiemporeal", conexion, if_exists="append", index=False)
-        
-        conexion.close()
-        st.sidebar.success("💾 Datos guardados en la base de datos local.")
-        
-    except Exception as e:
-        st.sidebar.error(f"Error al guardar en base de datos: {e}")
 
     return df_espana
 
@@ -284,22 +312,105 @@ def descarga_alertas_terrestres(rango_dias=1):
         st.sidebar.error(f"Fallo de resolución o conexión: {str(e)}")
         return pd.DataFrame()
     
+def guardar_en_sqlite(df, db_path="Base-de-datos/pirovigia.db"):
+    if df.empty:
+        return False, "No hay datos para guardar."
+    
+    # 1. Aseguramos que la columna de fecha sea texto para SQLite
+    df_sql = df.copy()
+    if 'acq_date' in df_sql.columns:
+        df_sql['acq_date'] = df_sql['acq_date'].astype(str)
+        
+    try:
+        # 2. Conectamos a la base de datos (se crea el archivo si no existe)
+        conn = sqlite3.connect(db_path)
+        
+        # 3. Volcamos el dataframe a una tabla temporal
+        df_sql.to_sql("temp_focos", conn, if_exists="replace", index=False)
+        
+        # 4. Creamos la tabla principal asegurando una clave ÚNICA 
+        # (Latitud, Longitud, Fecha y Hora) para evitar duplicados
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS deteccion_tiemporeal (
+                latitude REAL,
+                longitude REAL,
+                frp REAL,
+                confidence REAL,
+                acq_date TEXT,
+                acq_time TEXT,
+                satelite_sensor TEXT,
+                Region TEXT,
+                Origen TEXT,
+                horario TEXT,
+                UNIQUE(latitude, longitude, acq_date, acq_time)
+            )
+        """)
+        
+        # 5. Insertamos de la temporal a la principal ignorando los que ya existan
+        # Obtenemos las columnas comunes para evitar errores si falta alguna
+        columnas_df = [c for c in df_sql.columns if c in ['latitude', 'longitude', 'frp', 'confidence', 'acq_date', 'acq_time', 'satelite_sensor', 'Region', 'Origen', 'horario']]
+        columnas_str = ", ".join(columnas_df)
+        
+        cursor = conn.execute(f"""
+            INSERT OR IGNORE INTO deteccion_tiemporeal ({columnas_str})
+            SELECT {columnas_str} FROM temp_focos
+        """)
+        
+        filas_insertadas = cursor.rowcount
+        conn.commit()
+        return True, f"Datos guardados. {filas_insertadas} focos nuevos añadidos a la BD."
+        
+    except Exception as e:
+        return False, f"Error al guardar: {e}"
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=60) # Refresca la caché cada 60s por si guardas datos nuevos
+def cargar_tiemporeal_sqlite(db_path="Base-de-datos/pirovigia.db"):
+    try:
+        conn = sqlite3.connect(db_path)
+        
+        # Comprobamos si la tabla existe primero
+        query_check = "SELECT name FROM sqlite_master WHERE type='table' AND name='deteccion_tiemporeal';"
+        if pd.read_sql_query(query_check, conn).empty:
+            conn.close()
+            st.warning("La base de datos SQLite está vacía. Guarda datos en tiempo real primero.")
+            return pd.DataFrame()
+        
+        df_bd = pd.read_sql_query("SELECT * FROM deteccion_tiemporeal", conn)
+        conn.close()
+        
+        if not df_bd.empty:
+            df_bd['acq_date'] = pd.to_datetime(df_bd['acq_date'], errors='coerce')
+            df_bd['Año'] = df_bd['acq_date'].dt.year
+            
+        return df_bd
+    except Exception as e:
+        st.error(f"Error al cargar la base de datos SQLite: {e}")
+        return pd.DataFrame()
+    
+# --- PANEL DE CONTROL SIDEBAR --- 
 # --- PANEL DE CONTROL SIDEBAR --- 
 st.sidebar.title("🗺️ Control de Feed")
 st.sidebar.markdown("---")
 
 modo_datos = st.sidebar.radio(
     "🛰️ Selecciona el origen de datos:",
-    ["🔴 Satélites NASA (Tiempo real 24h España)", "📊 Histórico local"]
+    [
+        "🔴 Satélites NASA (Tiempo real 24h España)", 
+        "📊 Histórico Base de Datos (SQLite)",
+        "🗄️ Tiempo real Base de Datos (SQLite)"
+    ]
 )
 
 rango_dias = st.sidebar.select_slider(
     "📅 Ventana de tiempo (Días):",
-    options=[1,2,3],
+    options=[1, 2, 3],
     value=1,
     help="Selecciona cuántos días atrás buscar en los servidores de la NASA"
 )
 
+# --- PROCESAMIENTO Y AUTO-GUARDADO ---
 if modo_datos == "🔴 Satélites NASA (Tiempo real 24h España)":
     df_sat = descarga_tiempo_real(rango_dias)
     df_terr = descarga_alertas_terrestres(rango_dias)
@@ -308,7 +419,8 @@ if modo_datos == "🔴 Satélites NASA (Tiempo real 24h España)":
         df_origen = pd.concat([df_sat, df_terr], ignore_index=True)
     elif not df_sat.empty:
         df_origen = df_sat
-    else: df_origen = df_terr
+    else: 
+        df_origen = df_terr
 
     if not df_origen.empty:
         df_origen['acq_time_str'] = df_origen['acq_time'].astype(str).str.split('.').str[0].str.zfill(4)
@@ -317,18 +429,52 @@ if modo_datos == "🔴 Satélites NASA (Tiempo real 24h España)":
         
         if 'daynight' in df_origen.columns:
             df_origen['horario'] = df_origen['daynight'].str.strip().str.upper().map({'D': '☀️ Día', 'N': '🌙 Noche'}).fillna('☀️ Día')
-else:
-    df_origen = cargar_csv()
+
+        # -----------------------------------------------------------------
+        # 🔄 AUTO-GUARDADO AUTOMÁTICO EN SQLITE AL ENTRAR / ACTUALIZAR
+        # -----------------------------------------------------------------
+        exito, mensaje = guardar_en_sqlite(df_origen)
+        if exito:
+            cargar_tiemporeal_sqlite.clear()  # Limpiamos la caché del histórico SQLite para reflejar los nuevos datos inmediatamente
+            st.sidebar.caption("🟢 **BD Sincronizada:** Feed de la NASA guardado automáticamente.")
+        else:
+            st.sidebar.caption(f"⚠️ **BD Estado:** {mensaje}")
+
+elif modo_datos == "📊 Histórico Base de Datos (SQLite)":
+    df_origen = cargar_historico_sqlite()
+elif modo_datos == "🗄️ Tiempo real Base de Datos (SQLite)":
+    df_origen = cargar_tiemporeal_sqlite()
+    
+    # Aplicamos el filtro del slider de la ventana de tiempo (rango_dias)
+    if not df_origen.empty:
+        df_origen['acq_date'] = pd.to_datetime(df_origen['acq_date'], errors='coerce')
+        hoy_medianoche = pd.Timestamp.now().normalize()
+        fecha_limite = hoy_medianoche - pd.Timedelta(days=rango_dias - 1)
+        df_origen = df_origen[df_origen['acq_date'] >= fecha_limite]
+
+modos_historicos = ["📊 Histórico Base de Datos (SQLite)", "🗄️ Tiempo real Base de Datos (SQLite)"]
+
+if modo_datos in modos_historicos and not df_origen.empty:
+    if 'Año' in df_origen.columns:
+        lista_anos = sorted(list(df_origen['Año'].dropna().unique()))
+        if len(lista_anos) > 1:
+            rango_anos = st.sidebar.slider(
+                "Filtrar por ventana anual:", 
+                min_value=int(lista_anos[0]), 
+                max_value=int(lista_anos[-1]), 
+                value=(int(lista_anos[0]), int(lista_anos[-1]))
+            )
+            df_origen = df_origen[(df_origen['Año'] >= rango_anos[0]) & (df_origen['Año'] <= rango_anos[1])]
 
 # --- FILTROS TÁCTICOS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtros de amenaza")
 categorias_base = ['Incendio forestal', 'Zona industrial', 'Zona volcánica', 'Otros', 'Alerta Terrestre Oficial']
-if not df_origen.empty:
-    opciones_disponibles = list(set(categorias_base) | set(df_origen['Origen'].unique()))
+if not df_origen.empty and 'Origen' in df_origen.columns:
+    opciones_disponibles = list(set(categorias_base) | set(df_origen['Origen'].dropna().unique()))
 else:
     opciones_disponibles = categorias_base
-
+    
 filtro_origen = st.sidebar.multiselect(
     "Tipo de amenaza / Origen:",
     options=opciones_disponibles,
@@ -354,11 +500,6 @@ filtro_comunidades = st.sidebar.multiselect(
     help="Filtra los focos térmicos según la comunidad asignada"
 )
 
-if modo_datos == "📊 Histórico local" and not df_origen.empty:
-    lista_anos = sorted(list(df_origen['Año'].unique()))
-    if len(lista_anos) > 1:
-        rango_anos = st.sidebar.slider("Filtrar por ventana anual:", min_value=lista_anos[0], max_value=lista_anos[-1], value=(lista_anos[0], lista_anos[-1]))
-        df_origen = df_origen[(df_origen['Año'] >= rango_anos[0]) & (df_origen['Año'] <= rango_anos[1])]
 
 if not df_origen.empty:
     es_alerta_terrestre = df_origen['Origen'] == 'Alerta Terrestre Oficial'
@@ -425,10 +566,12 @@ zoom_inicial = 6
 LIMITE_RENDER = 1500
 
 if total_focos > LIMITE_RENDER:
-    df_render = df_filtrado.sample(LIMITE_RENDER, random_state=42)
+    # Selecciona directamente los 1.500 focos de mayor potencia térmica
+    df_render = df_filtrado.sort_values(by='frp', ascending=False).head(LIMITE_RENDER)
+    
     st.caption(
-        f"⚠️ Mostrando una muestra aleatoria de {LIMITE_RENDER:,} de {total_focos:,} "
-        f"focos para mantener el mapa fluido. Usa los filtros para acotar el resultado."
+        f"⚠️ Mostrando los {LIMITE_RENDER:,} focos con mayor FRP de un total de {total_focos:,} "
+        f"para mantener el mapa fluido."
     )
 else:
     df_render = df_filtrado
